@@ -1,0 +1,262 @@
+name: Reusable Node Package Release
+
+on:
+  workflow_call:
+    inputs:
+      mode:
+        description: "Release mode: version | staging | release"
+        required: true
+        type: string
+      package-name:
+        description: "Published package name"
+        required: true
+        type: string
+      registry-url:
+        description: "Registry URL used for publish checks and publish"
+        required: false
+        default: "https://npm.pkg.github.com"
+        type: string
+      node-version:
+        description: "Node.js major version"
+        required: false
+        default: "22"
+        type: string
+      version-branch:
+        description: "Branch that triggers changesets version PR"
+        required: false
+        default: "main"
+        type: string
+      staging-branch:
+        description: "Branch that triggers staging prereleases"
+        required: false
+        default: "staging"
+        type: string
+      stable-branch:
+        description: "Branch that stable release tags must point to"
+        required: false
+        default: "main"
+        type: string
+      version-command:
+        description: "Command run by changesets/action to bump versions"
+        required: false
+        default: "pnpm changeset version"
+        type: string
+      build-command:
+        description: "Build command"
+        required: false
+        default: "pnpm build"
+        type: string
+      release-tag:
+        description: "Release tag (required for mode=release, e.g. v1.2.3)"
+        required: false
+        default: ""
+        type: string
+      release-prerelease:
+        description: "Whether release payload was prerelease"
+        required: false
+        default: false
+        type: boolean
+      version-pr-commit:
+        description: "Commit message for version PR commits"
+        required: false
+        default: "chore-version-package"
+        type: string
+      version-pr-title:
+        description: "PR title for version PR"
+        required: false
+        default: "chore-version-package"
+        type: string
+      release-artifact-dir:
+        description: "Directory used for packed release artifacts"
+        required: false
+        default: "artifacts/release"
+        type: string
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  validate-inputs:
+    name: Validate Inputs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate mode
+        run: |
+          case "${{ inputs.mode }}" in
+            version|staging|release) ;;
+            *)
+              echo "::error::inputs.mode must be one of: version, staging, release"
+              exit 1
+              ;;
+          esac
+
+      - name: Validate release inputs
+        if: inputs.mode == 'release'
+        run: |
+          if [ -z "${{ inputs.release-tag }}" ]; then
+            echo "::error::inputs.release-tag is required when mode=release"
+            exit 1
+          fi
+
+  version:
+    name: Create Version PR
+    needs: validate-inputs
+    if: inputs.mode == 'version'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup pnpm
+        uses: calan-co/cicd-shared-pipeline/.github/actions/setup-workspace@v1
+        with:
+          node-version: ${{ inputs.node-version }}
+          registry-url: ${{ inputs.registry-url }}
+
+      - name: Create or update version pull request
+        uses: changesets/action@v1
+        with:
+          version: ${{ inputs.version-command }}
+          commit: ${{ inputs.version-pr-commit }}
+          title: ${{ inputs.version-pr-title }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish-staging-prerelease:
+    name: Publish Staging Prerelease
+    needs: validate-inputs
+    if: inputs.mode == 'staging'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout staging branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: calan-co/cicd-shared-pipeline/.github/actions/setup-workspace@v1
+        with:
+          node-version: ${{ inputs.node-version }}
+          registry-url: ${{ inputs.registry-url }}
+
+      - name: Derive prerelease version
+        id: prerelease
+        run: |
+          BASE_VERSION="$(node -e "process.stdout.write(JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version)")"
+          BASE_VERSION="${BASE_VERSION%%-*}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE_VERSION"
+          NEXT_PATCH=$((PATCH + 1))
+          PRERELEASE_VERSION="${MAJOR}.${MINOR}.${NEXT_PATCH}-staging.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          echo "version=$PRERELEASE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "prerelease_version=$PRERELEASE_VERSION" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Apply prerelease version
+        run: npm version --no-git-tag-version ${{ steps.prerelease.outputs.version }}
+
+      - name: Build package
+        run: ${{ inputs.build-command }}
+
+      - name: Publish prerelease package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE_VERSION: ${{ steps.prerelease.outputs.version }}
+        run: |
+          if npm view "${{ inputs.package-name }}@$PACKAGE_VERSION" version --registry "${{ inputs.registry-url }}" >/dev/null 2>&1; then
+            echo "${{ inputs.package-name }}@$PACKAGE_VERSION already exists; skipping publish"
+          else
+            pnpm publish --tag next --no-git-checks
+          fi
+
+  publish-release:
+    name: Publish Stable Release
+    needs: validate-inputs
+    if: inputs.mode == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: refs/tags/${{ inputs.release-tag }}
+
+      - name: Setup pnpm
+        uses: calan-co/cicd-shared-pipeline/.github/actions/setup-workspace@v1
+        with:
+          node-version: ${{ inputs.node-version }}
+          registry-url: ${{ inputs.registry-url }}
+
+      - name: Validate release metadata
+        env:
+          TAG_NAME: ${{ inputs.release-tag }}
+          PRERELEASE_FLAG: ${{ inputs.release-prerelease }}
+        run: |
+          case "$TAG_NAME" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              echo "::error::Stable release tag must match vX.Y.Z"
+              exit 1
+              ;;
+          esac
+
+          if [ "$PRERELEASE_FLAG" = 'true' ]; then
+            echo "::error::Stable tag releases must not be marked as prerelease"
+            exit 1
+          fi
+
+      - name: Verify release commit is on stable branch
+        run: |
+          git fetch origin "${{ inputs.stable-branch }}" --force
+          if ! git merge-base --is-ancestor HEAD "refs/remotes/origin/${{ inputs.stable-branch }}"; then
+            echo "::error::Release tag must reference a commit already on origin/${{ inputs.stable-branch }}"
+            exit 1
+          fi
+
+      - name: Verify package version matches tag
+        env:
+          TAG_NAME: ${{ inputs.release-tag }}
+        run: |
+          EXPECTED_VERSION="${TAG_NAME#v}"
+          PACKAGE_VERSION="$(node -e "process.stdout.write(JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version)")"
+          if [ "$PACKAGE_VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "::error::Tag $TAG_NAME does not match package.json version $PACKAGE_VERSION"
+            exit 1
+          fi
+
+      - name: Build package
+        run: ${{ inputs.build-command }}
+
+      - name: Create package tarball
+        run: |
+          mkdir -p "${{ inputs.release-artifact-dir }}"
+          pnpm pack --pack-destination "${{ inputs.release-artifact-dir }}"
+
+      - name: Publish stable package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ inputs.release-tag }}
+        run: |
+          VERSION="${TAG_NAME#v}"
+          if npm view "${{ inputs.package-name }}@$VERSION" version --registry "${{ inputs.registry-url }}" >/dev/null 2>&1; then
+            echo "${{ inputs.package-name }}@$VERSION already exists; skipping publish"
+          else
+            pnpm publish --tag latest --no-git-checks
+          fi
+
+      - name: Attach tarball to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ inputs.release-tag }}
+        run: gh release upload "$TAG_NAME" "${{ inputs.release-artifact-dir }}"/*.tgz --clobber
