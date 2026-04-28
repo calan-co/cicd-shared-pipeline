@@ -1,0 +1,311 @@
+name: Reusable Node Package CI
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: Node.js major version
+        required: false
+        default: "22"
+        type: string
+      lint-command:
+        description: Lint command
+        required: false
+        default: pnpm run lint
+        type: string
+      typecheck-command:
+        description: Type-check command
+        required: false
+        default: pnpm exec tsc --noEmit
+        type: string
+      docs-command:
+        description: Docs/API guard command
+        required: false
+        default: pnpm run docs:lint
+        type: string
+      backlog-command:
+        description: Backlog/work-item frontmatter command
+        required: false
+        default: pnpm run backlog:validate:ci
+        type: string
+      test-command:
+        description: Test command
+        required: false
+        default: pnpm run test -- --run
+        type: string
+      build-command:
+        description: Build command
+        required: false
+        default: pnpm run build
+        type: string
+      require-changeset:
+        description: Enforce changeset for release-impacting PR changes
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  install:
+    name: Install Dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run lint
+        run: ${{ inputs.lint-command }}
+
+  type-check:
+    name: Type Check
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: ${{ inputs.typecheck-command }}
+
+  lint-work-item-frontmatter:
+    name: Lint Work Item Frontmatter
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate work items
+        run: ${{ inputs.backlog-command }}
+
+      - name: Upload backlog audit artifact
+        if: always() && hashFiles('backlog/audit/auditing-backlog-report.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: backlog-audit-report
+          path: backlog/audit/auditing-backlog-report.json
+
+  require-changeset:
+    name: Require Changeset
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Enforce Changeset for released artifacts
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          REQUIRE_CHANGESET: ${{ inputs.require-changeset }}
+        run: |
+          if [ "$REQUIRE_CHANGESET" != "true" ]; then
+            echo "Changeset gate disabled"
+            exit 0
+          fi
+
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "Not a pull_request event; skipping changeset requirement"
+            exit 0
+          fi
+
+          if [ -z "$BASE_REF" ]; then
+            echo "No base_ref set; skipping changeset requirement"
+            exit 0
+          fi
+
+          git fetch origin "$BASE_REF" --depth=1
+
+          CHANGED_FILES="$(git diff --name-only "origin/$BASE_REF...HEAD")"
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          if [ -z "$CHANGED_FILES" ]; then
+            echo "No changed files detected"
+            exit 0
+          fi
+
+          REQUIRES_CHANGESET=0
+          while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            case "$file" in
+              docs/*|backlog/*|README.md|CHANGELOG.md|LICENSE|.github/*)
+                ;;
+              *)
+                REQUIRES_CHANGESET=1
+                break
+                ;;
+            esac
+          done <<EOF
+          $CHANGED_FILES
+          EOF
+
+          if [ "$REQUIRES_CHANGESET" -eq 0 ]; then
+            echo "Docs/workflow-only change; no changeset required"
+            exit 0
+          fi
+
+          CHANGESET_COUNT=$(find .changeset -maxdepth 1 -name '*.md' ! -name 'README.md' | wc -l | tr -d ' ')
+          if [ "$CHANGESET_COUNT" -lt 1 ]; then
+            echo "::error::Release-impacting changes detected but no .changeset/*.md file found"
+            exit 1
+          fi
+
+          echo "Changeset requirement satisfied ($CHANGESET_COUNT files found)"
+
+  docs-api-guard:
+    name: Docs API Guard
+    runs-on: ubuntu-latest
+    needs: install
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run docs lint
+        run: ${{ inputs.docs-command }}
+
+  test:
+    name: Test (Node ${{ matrix.node-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    needs: install
+    strategy:
+      matrix:
+        node-version: ["22", "24"]
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run tests
+        run: ${{ inputs.test-command }}
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs:
+      - lint
+      - type-check
+      - lint-work-item-frontmatter
+      - require-changeset
+      - docs-api-guard
+      - test
+    if: >-
+      ${{
+        always() &&
+        needs.lint.result == 'success' &&
+        needs.type-check.result == 'success' &&
+        needs.lint-work-item-frontmatter.result == 'success' &&
+        needs.docs-api-guard.result == 'success' &&
+        needs.test.result == 'success' &&
+        (needs.require-changeset.result == 'success' || needs.require-changeset.result == 'skipped')
+      }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build package
+        run: ${{ inputs.build-command }}
