@@ -1,0 +1,75 @@
+name: Reusable Node Package Staging Publish
+
+on:
+  workflow_call:
+    inputs:
+      package-name:
+        description: Published package name
+        required: true
+        type: string
+      registry-url:
+        description: Registry URL used for publish checks and publish
+        required: false
+        default: https://npm.pkg.github.com
+        type: string
+      node-version:
+        description: Node.js major version
+        required: false
+        default: "22"
+        type: string
+      build-command:
+        description: Build command
+        required: false
+        default: pnpm build
+        type: string
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  publish-staging-prerelease:
+    name: Publish Staging Prerelease
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout staging branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: calan-co/cicd-shared-pipeline/.github/actions/setup-workspace@v1
+        with:
+          node-version: ${{ inputs.node-version }}
+          registry-url: ${{ inputs.registry-url }}
+
+      - name: Derive prerelease version
+        id: prerelease
+        run: |
+          BASE_VERSION="$(node -e "process.stdout.write(JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version)")"
+          BASE_VERSION="${BASE_VERSION%%-*}"
+          IFS='.' read -r MAJOR MINOR PATCH <<< "$BASE_VERSION"
+          NEXT_PATCH=$((PATCH + 1))
+          PRERELEASE_VERSION="${MAJOR}.${MINOR}.${NEXT_PATCH}-staging.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          echo "version=$PRERELEASE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "prerelease_version=$PRERELEASE_VERSION" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Apply prerelease version
+        run: npm version --no-git-tag-version ${{ steps.prerelease.outputs.version }}
+
+      - name: Build package
+        run: ${{ inputs.build-command }}
+
+      - name: Publish prerelease package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE_VERSION: ${{ steps.prerelease.outputs.version }}
+        run: |
+          if npm view "${{ inputs.package-name }}@$PACKAGE_VERSION" version --registry "${{ inputs.registry-url }}" >/dev/null 2>&1; then
+            echo "${{ inputs.package-name }}@$PACKAGE_VERSION already exists; skipping publish"
+          else
+            pnpm publish --tag next --no-git-checks
+          fi

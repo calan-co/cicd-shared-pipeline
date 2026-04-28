@@ -1,0 +1,67 @@
+name: Reusable Node Package Version
+
+on:
+  workflow_call:
+    inputs:
+      package-name:
+        description: Published package name
+        required: true
+        type: string
+      registry-url:
+        description: Registry URL used for publish checks and publish
+        required: false
+        default: https://npm.pkg.github.com
+        type: string
+      node-version:
+        description: Node.js major version
+        required: false
+        default: "22"
+        type: string
+      version-command:
+        description: Command run by changesets/action to bump versions
+        required: false
+        default: pnpm changeset version
+        type: string
+      version-pr-commit:
+        description: Commit message for version PR commits
+        required: false
+        default: chore-version-package
+        type: string
+      version-pr-title:
+        description: PR title for version PR
+        required: false
+        default: chore-version-package
+        type: string
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  version:
+    name: Create Version PR
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup pnpm
+        uses: calan-co/cicd-shared-pipeline/.github/actions/setup-workspace@v1
+        with:
+          node-version: ${{ inputs.node-version }}
+          registry-url: ${{ inputs.registry-url }}
+
+      - name: Create or update version pull request
+        uses: changesets/action@v1
+        with:
+          version: ${{ inputs.version-command }}
+          commit: ${{ inputs.version-pr-commit }}
+          title: ${{ inputs.version-pr-title }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
