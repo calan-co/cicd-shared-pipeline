@@ -6,7 +6,17 @@ on:
       node-version:
         description: Node.js major version
         required: false
-        default: "22"
+        default: "24"
+        type: string
+      working-directory:
+        description: Working directory for run steps
+        required: false
+        default: "."
+        type: string
+      install-command:
+        description: Install command executed in each job
+        required: false
+        default: pnpm install --frozen-lockfile
         type: string
       lint-command:
         description: Lint command
@@ -38,8 +48,58 @@ on:
         required: false
         default: pnpm run build
         type: string
+      test-matrix-node-versions:
+        description: JSON array of Node versions used for matrix tests
+        required: false
+        default: '["22", "24"]'
+        type: string
+      test-matrix-os:
+        description: JSON array of runner labels used for matrix tests
+        required: false
+        default: '["ubuntu-latest", "macos-latest", "windows-latest"]'
+        type: string
+      changeset-exempt-path-prefixes:
+        description: Space-delimited path prefixes exempt from changeset requirement
+        required: false
+        default: "docs/ backlog/ README.md CHANGELOG.md LICENSE .github/"
+        type: string
       require-changeset:
         description: Enforce changeset for release-impacting PR changes
+        required: false
+        default: true
+        type: boolean
+      enable-lint:
+        description: Enable lint job
+        required: false
+        default: true
+        type: boolean
+      enable-type-check:
+        description: Enable type-check job
+        required: false
+        default: true
+        type: boolean
+      enable-backlog-check:
+        description: Enable backlog/work-item validation job
+        required: false
+        default: true
+        type: boolean
+      enable-docs-check:
+        description: Enable docs API guard job
+        required: false
+        default: true
+        type: boolean
+      enable-tests:
+        description: Enable test matrix job
+        required: false
+        default: true
+        type: boolean
+      enable-build:
+        description: Enable build job
+        required: false
+        default: true
+        type: boolean
+      enable-changeset-check:
+        description: Enable changeset gate job
         required: false
         default: true
         type: boolean
@@ -71,10 +131,12 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        working-directory: ${{ inputs.working-directory }}
+        run: ${{ inputs.install-command }}
 
   lint:
     name: Lint
+    if: inputs.enable-lint
     runs-on: ubuntu-latest
     needs: install
     steps:
@@ -91,13 +153,16 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        working-directory: ${{ inputs.working-directory }}
+        run: ${{ inputs.install-command }}
 
       - name: Run lint
+        working-directory: ${{ inputs.working-directory }}
         run: ${{ inputs.lint-command }}
 
   type-check:
     name: Type Check
+    if: inputs.enable-type-check
     runs-on: ubuntu-latest
     needs: install
     steps:
@@ -114,13 +179,16 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        working-directory: ${{ inputs.working-directory }}
+        run: ${{ inputs.install-command }}
 
       - name: Type check
+        working-directory: ${{ inputs.working-directory }}
         run: ${{ inputs.typecheck-command }}
 
   lint-work-item-frontmatter:
     name: Lint Work Item Frontmatter
+    if: inputs.enable-backlog-check
     runs-on: ubuntu-latest
     needs: install
     steps:
@@ -139,9 +207,11 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        working-directory: ${{ inputs.working-directory }}
+        run: ${{ inputs.install-command }}
 
       - name: Validate work items
+        working-directory: ${{ inputs.working-directory }}
         run: ${{ inputs.backlog-command }}
 
       - name: Upload backlog audit artifact
@@ -153,6 +223,7 @@ jobs:
 
   require-changeset:
     name: Require Changeset
+    if: inputs.enable-changeset-check
     runs-on: ubuntu-latest
     needs: install
     steps:
@@ -166,9 +237,10 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           BASE_REF: ${{ github.base_ref }}
           REQUIRE_CHANGESET: ${{ inputs.require-changeset }}
+          EXEMPT_PREFIXES: ${{ inputs.changeset-exempt-path-prefixes }}
         run: |
           if [ "$REQUIRE_CHANGESET" != "true" ]; then
-            echo "Changeset gate disabled"
+            echo "Changeset requirement disabled"
             exit 0
           fi
 
@@ -196,33 +268,37 @@ jobs:
           REQUIRES_CHANGESET=0
           while IFS= read -r file; do
             [ -z "$file" ] && continue
-            case "$file" in
-              docs/*|backlog/*|README.md|CHANGELOG.md|LICENSE|.github/*)
-                ;;
-              *)
-                REQUIRES_CHANGESET=1
-                break
-                ;;
-            esac
-          done <<EOF
-          $CHANGED_FILES
-          EOF
+            IS_EXEMPT=0
+            for prefix in $EXEMPT_PREFIXES; do
+              case "$file" in
+                "$prefix"*)
+                  IS_EXEMPT=1
+                  break
+                  ;;
+              esac
+            done
+            if [ "$IS_EXEMPT" -eq 0 ]; then
+              REQUIRES_CHANGESET=1
+              break
+            fi
+          done <<< "$CHANGED_FILES"
 
           if [ "$REQUIRES_CHANGESET" -eq 0 ]; then
-            echo "Docs/workflow-only change; no changeset required"
+            echo "Only exempt paths changed; no changeset required"
             exit 0
           fi
 
-          CHANGESET_COUNT=$(find .changeset -maxdepth 1 -name '*.md' ! -name 'README.md' | wc -l | tr -d ' ')
-          if [ "$CHANGESET_COUNT" -lt 1 ]; then
-            echo "::error::Release-impacting changes detected but no .changeset/*.md file found"
+          CHANGESET_DIFF_COUNT="$(printf '%s\n' "$CHANGED_FILES" | grep -E '^\.changeset/[^/]+\.md$' | grep -vE '^\.changeset/README\.md$' | wc -l | tr -d ' ')"
+          if [ "$CHANGESET_DIFF_COUNT" -lt 1 ]; then
+            echo "::error::Release-impacting PR changes detected, but no .changeset/*.md file was added/modified in this PR"
             exit 1
           fi
 
-          echo "Changeset requirement satisfied ($CHANGESET_COUNT files found)"
+          echo "Changeset requirement satisfied ($CHANGESET_DIFF_COUNT changeset file(s) changed in PR)"
 
   docs-api-guard:
     name: Docs API Guard
+    if: inputs.enable-docs-check
     runs-on: ubuntu-latest
     needs: install
     steps:
@@ -239,19 +315,22 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        working-directory: ${{ inputs.working-directory }}
+        run: ${{ inputs.install-command }}
 
       - name: Run docs lint
+        working-directory: ${{ inputs.working-directory }}
         run: ${{ inputs.docs-command }}
 
   test:
     name: Test (Node ${{ matrix.node-version }}, ${{ matrix.os }})
+    if: inputs.enable-tests
     runs-on: ${{ matrix.os }}
     needs: install
     strategy:
       matrix:
-        node-version: ["22", "24"]
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        node-version: ${{ fromJSON(inputs.test-matrix-node-versions) }}
+        os: ${{ fromJSON(inputs.test-matrix-os) }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -266,9 +345,11 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        working-directory: ${{ inputs.working-directory }}
+        run: ${{ inputs.install-command }}
 
       - name: Run tests
+        working-directory: ${{ inputs.working-directory }}
         run: ${{ inputs.test-command }}
 
   build:
@@ -283,12 +364,13 @@ jobs:
       - test
     if: >-
       ${{
+        inputs.enable-build &&
         always() &&
-        needs.lint.result == 'success' &&
-        needs.type-check.result == 'success' &&
-        needs.lint-work-item-frontmatter.result == 'success' &&
-        needs.docs-api-guard.result == 'success' &&
-        needs.test.result == 'success' &&
+        (needs.lint.result == 'success' || needs.lint.result == 'skipped') &&
+        (needs.type-check.result == 'success' || needs.type-check.result == 'skipped') &&
+        (needs.lint-work-item-frontmatter.result == 'success' || needs.lint-work-item-frontmatter.result == 'skipped') &&
+        (needs.docs-api-guard.result == 'success' || needs.docs-api-guard.result == 'skipped') &&
+        (needs.test.result == 'success' || needs.test.result == 'skipped') &&
         (needs.require-changeset.result == 'success' || needs.require-changeset.result == 'skipped')
       }}
     steps:
@@ -305,7 +387,9 @@ jobs:
           cache: pnpm
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        working-directory: ${{ inputs.working-directory }}
+        run: ${{ inputs.install-command }}
 
       - name: Build package
+        working-directory: ${{ inputs.working-directory }}
         run: ${{ inputs.build-command }}
