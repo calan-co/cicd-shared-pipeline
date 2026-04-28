@@ -1,0 +1,130 @@
+name: Reusable Node Package Stable Release
+
+on:
+  workflow_call:
+    inputs:
+      package-name:
+        description: Published package name
+        required: true
+        type: string
+      registry-url:
+        description: Registry URL used for publish checks and publish
+        required: false
+        default: https://npm.pkg.github.com
+        type: string
+      node-version:
+        description: Node.js major version
+        required: false
+        default: "22"
+        type: string
+      stable-branch:
+        description: Branch that stable release tags must point to
+        required: false
+        default: main
+        type: string
+      build-command:
+        description: Build command
+        required: false
+        default: pnpm build
+        type: string
+      release-tag:
+        description: Release tag (required, e.g. v1.2.3)
+        required: true
+        type: string
+      release-prerelease:
+        description: Whether release payload was prerelease
+        required: false
+        default: false
+        type: boolean
+      release-artifact-dir:
+        description: Directory used for packed release artifacts
+        required: false
+        default: artifacts/release
+        type: string
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  publish-release:
+    name: Publish Stable Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: refs/tags/${{ inputs.release-tag }}
+
+      - name: Setup pnpm
+        uses: calan-co/cicd-shared-pipeline/.github/actions/setup-workspace@v1
+        with:
+          node-version: ${{ inputs.node-version }}
+          registry-url: ${{ inputs.registry-url }}
+
+      - name: Validate release metadata
+        env:
+          TAG_NAME: ${{ inputs.release-tag }}
+          PRERELEASE_FLAG: ${{ inputs.release-prerelease }}
+        run: |
+          case "$TAG_NAME" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *)
+              echo "::error::Stable release tag must match vX.Y.Z"
+              exit 1
+              ;;
+          esac
+
+          if [ "$PRERELEASE_FLAG" = "true" ]; then
+            echo "::error::Stable tag releases must not be marked as prerelease"
+            exit 1
+          fi
+
+      - name: Verify release commit is on stable branch
+        run: |
+          git fetch origin "${{ inputs.stable-branch }}" --force
+          if ! git merge-base --is-ancestor HEAD "refs/remotes/origin/${{ inputs.stable-branch }}"; then
+            echo "::error::Release tag must reference a commit already on origin/${{ inputs.stable-branch }}"
+            exit 1
+          fi
+
+      - name: Verify package version matches tag
+        env:
+          TAG_NAME: ${{ inputs.release-tag }}
+        run: |
+          EXPECTED_VERSION="${TAG_NAME#v}"
+          PACKAGE_VERSION="$(node -e "process.stdout.write(JSON.parse(require('node:fs').readFileSync('package.json', 'utf8')).version)")"
+          if [ "$PACKAGE_VERSION" != "$EXPECTED_VERSION" ]; then
+            echo "::error::Tag $TAG_NAME does not match package.json version $PACKAGE_VERSION"
+            exit 1
+          fi
+
+      - name: Build package
+        run: ${{ inputs.build-command }}
+
+      - name: Create package tarball
+        run: |
+          mkdir -p "${{ inputs.release-artifact-dir }}"
+          pnpm pack --pack-destination "${{ inputs.release-artifact-dir }}"
+
+      - name: Publish stable package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ inputs.release-tag }}
+        run: |
+          VERSION="${TAG_NAME#v}"
+          if npm view "${{ inputs.package-name }}@$VERSION" version --registry "${{ inputs.registry-url }}" >/dev/null 2>&1; then
+            echo "${{ inputs.package-name }}@$VERSION already exists; skipping publish"
+          else
+            pnpm publish --tag latest --no-git-checks
+          fi
+
+      - name: Attach tarball to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ inputs.release-tag }}
+        run: gh release upload "$TAG_NAME" "${{ inputs.release-artifact-dir }}"/*.tgz --clobber
