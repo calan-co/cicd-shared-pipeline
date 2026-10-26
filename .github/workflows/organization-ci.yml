@@ -1,0 +1,14 @@
+name: Organization CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  hygiene:
+    uses: ./.github/workflows/reusable-repository-hygiene.yml

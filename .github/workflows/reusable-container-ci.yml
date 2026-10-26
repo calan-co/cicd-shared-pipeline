@@ -1,0 +1,20 @@
+name: Reusable Container CI
+
+on:
+  workflow_call:
+    inputs:
+      build-command:
+        type: string
+        default: docker build .
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: Container CI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build container
+        run: ${{ inputs.build-command }}

@@ -1,0 +1,83 @@
+name: Reusable Node CI
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        type: string
+        default: "22"
+      package-manager:
+        type: string
+        default: npm
+      pnpm-version:
+        type: string
+        default: "10"
+      cache-dependency-path:
+        type: string
+        default: package-lock.json
+      working-directory:
+        type: string
+        default: "."
+      install-command:
+        type: string
+        default: npm ci
+      lint-command:
+        type: string
+        default: ""
+      typecheck-command:
+        type: string
+        default: ""
+      test-command:
+        type: string
+        default: ""
+      build-command:
+        type: string
+        default: ""
+      enable-lint:
+        type: boolean
+        default: false
+      enable-typecheck:
+        type: boolean
+        default: false
+      enable-tests:
+        type: boolean
+        default: true
+      enable-build:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: Node CI
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.package-manager }}
+          cache-dependency-path: ${{ inputs.cache-dependency-path }}
+      - uses: pnpm/action-setup@v4
+        if: inputs.package-manager == 'pnpm'
+        with:
+          version: ${{ inputs.pnpm-version }}
+      - name: Install dependencies
+        run: ${{ inputs.install-command }}
+      - name: Lint
+        if: inputs.enable-lint
+        run: ${{ inputs.lint-command }}
+      - name: Type check
+        if: inputs.enable-typecheck
+        run: ${{ inputs.typecheck-command }}
+      - name: Test
+        if: inputs.enable-tests
+        run: ${{ inputs.test-command }}
+      - name: Build
+        if: inputs.enable-build
+        run: ${{ inputs.build-command }}

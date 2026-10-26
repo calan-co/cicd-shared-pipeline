@@ -1,0 +1,19 @@
+name: Reusable Shell CI
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: Shell CI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Bash syntax
+        run: |
+          while IFS= read -r file; do
+            bash -n "$file"
+          done < <(git ls-files '*.sh')
