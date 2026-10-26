@@ -11,7 +11,7 @@ on:
         default: npm
       pnpm-version:
         type: string
-        default: "10"
+        default: ""
       cache-dependency-path:
         type: string
         default: package-lock.json
@@ -59,7 +59,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
-        if: inputs.package-manager == 'pnpm'
+        if: inputs.package-manager == 'pnpm' && inputs.pnpm-version == ''
+      - uses: pnpm/action-setup@v4
+        if: inputs.package-manager == 'pnpm' && inputs.pnpm-version != ''
         with:
           version: ${{ inputs.pnpm-version }}
       - uses: actions/setup-node@v4
