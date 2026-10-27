@@ -18,6 +18,9 @@ on:
       working-directory:
         type: string
         default: "."
+      fetch-depth:
+        type: number
+        default: 1
       install-command:
         type: string
         default: npm ci
@@ -58,6 +61,8 @@ jobs:
         working-directory: ${{ inputs.working-directory }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ inputs.fetch-depth }}
       - uses: pnpm/action-setup@v4
         if: inputs.package-manager == 'pnpm' && inputs.pnpm-version == ''
       - uses: pnpm/action-setup@v4
